@@ -65,18 +65,27 @@ function is_update_available() {
   local remote_head
   remote_head=$(
     if (( ${+commands[curl]} )); then
-      curl -fsSL -H 'Accept: application/vnd.github.v3.sha' $api_url 2>/dev/null
+      curl -m 2 -fsSL -H 'Accept: application/vnd.github.v3.sha' $api_url 2>/dev/null
     elif (( ${+commands[wget]} )); then
-      wget -O- --header='Accept: application/vnd.github.v3.sha' $api_url 2>/dev/null
+      wget -T 2 -O- --header='Accept: application/vnd.github.v3.sha' $api_url 2>/dev/null
     elif (( ${+commands[fetch]} )); then
-      HTTP_ACCEPT='Accept: application/vnd.github.v3.sha' fetch -o - $api_url 2>/dev/null
+      HTTP_ACCEPT='Accept: application/vnd.github.v3.sha' fetch -T 2 -o - $api_url 2>/dev/null
     else
       exit 0
     fi
   ) || return 1
 
-  # Compare local and remote HEADs
-  [[ "$local_head" != "$remote_head" ]]
+  # Compare local and remote HEADs (if they're equal there are no updates)
+  [[ "$local_head" != "$remote_head" ]] || return 1
+
+  # If local and remote HEADs don't match, check if there's a common ancestor
+  # If the merge-base call fails, $remote_head might not be downloaded so assume there are updates
+  local base
+  base=$(cd -q "$ZSH"; git merge-base $local_head $remote_head 2>/dev/null) || return 0
+
+  # If the common ancestor ($base) is not $remote_head,
+  # the local HEAD is older than the remote HEAD
+  [[ $base != $remote_head ]]
 }
 
 function update_last_updated_file() {
@@ -87,6 +96,31 @@ function update_ohmyzsh() {
   if ZSH="$ZSH" zsh -f "$ZSH/tools/upgrade.sh" --interactive; then
     update_last_updated_file
   fi
+}
+
+function has_typed_input() {
+  # Created by Philippe Troin <phil@fifi.org>
+  # https://zsh.org/mla/users/2022/msg00062.html
+  emulate -L zsh
+  zmodload zsh/zselect
+
+  # Back up stty settings prior to disabling canonical mode
+  # Consider that no input can be typed if stty fails
+  # (this might happen if stdin is not a terminal)
+  local termios
+  termios=$(stty --save 2>/dev/null) || return 1
+  {
+    # Disable canonical mode so that typed input counts
+    # regardless of whether Enter was pressed
+    stty -icanon
+
+    # Poll stdin (fd 0) for data ready to be read
+    zselect -t 0 -r 0
+    return $?
+  } always {
+    # Restore stty settings
+    stty $termios
+  }
 }
 
 () {
@@ -159,7 +193,7 @@ function update_ohmyzsh() {
   fi
 
   # If user has typed input, show reminder and exit
-  if read -t -k 1; then
+  if has_typed_input; then
     echo
     echo "[oh-my-zsh] It's time to update! You can do that by running \`omz update\`"
     return 0
